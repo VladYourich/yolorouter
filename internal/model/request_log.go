@@ -15,7 +15,18 @@ import "time"
 type RequestLog struct {
 	ID        uint   `gorm:"column:id;primaryKey" json:"id"`
 	RequestID string `gorm:"column:request_id" json:"request_id"`
-	APIKeyID  *uint  `gorm:"column:api_key_id" json:"api_key_id"`
+	// W3CTraceID is the trace-id half of the caller's W3C traceparent
+	// header (32 lowercase hex digits), promoted from the captured header
+	// snapshot to its own queryable column so a gateway row can be joined
+	// back to the caller's trace in any W3C Trace Context compatible system
+	// (OpenTelemetry, Langfuse, Tempo, ...). It is written only when the
+	// whole header parses as strict W3C v1 and the gateway never invents an
+	// id, so a non-NULL value always means "this caller was tracing" —
+	// requests without the header, with a malformed one, rejected by
+	// authentication before the kernel, and rows that predate the column
+	// all read NULL.
+	W3CTraceID *string `gorm:"column:w3c_trace_id" json:"w3c_trace_id"`
+	APIKeyID   *uint   `gorm:"column:api_key_id" json:"api_key_id"`
 	// UserID is the owner of the API key that made the request, denormalized
 	// at write time so per-user statistics never need a JOIN through
 	// api_keys. New unauthenticated audit rows (APIKeyID NULL) carry NULL —
