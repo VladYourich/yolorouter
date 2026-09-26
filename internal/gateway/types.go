@@ -192,6 +192,12 @@ type Exchange struct {
 	// sensitive headers already masked (SanitizeHeaders). Captured once at
 	// Handle entry so it survives even an early rejection.
 	requestHeaders []byte
+	// w3cTraceID is the caller's W3C trace-id, parsed once from the masked
+	// snapshot above (traceIDFromHeaderSnapshot) and held rather than
+	// re-parsed, so every read — the audit row included — sees the same
+	// value the snapshot was captured with. "" when the caller sent no
+	// traceparent or sent one the strict parser refuses.
+	w3cTraceID string
 	// payloadLog is the admitted payload's policy for its own bodies — which
 	// may be persisted, how large each may be, and how to render them — read
 	// once at admission and enforced by the kernel before anything records
@@ -398,6 +404,12 @@ func (rc *Exchange) IngressProtocol() protocols.ProtocolID { return rc.ingress }
 
 // RequestHeaders is the masked header capture.
 func (rc *Exchange) RequestHeaders() []byte { return rc.requestHeaders }
+
+// W3CTraceID is the caller's W3C Trace Context trace-id, parsed once at
+// Handle entry from the masked header snapshot. "" means the caller was not
+// tracing (or sent an unusable traceparent); an id is never synthesized, so
+// the audit row's column reads as "the caller was tracing" and nothing else.
+func (rc *Exchange) W3CTraceID() string { return rc.w3cTraceID }
 
 // RequestBody is the caller's body, verbatim.
 func (rc *Exchange) RequestBody() []byte { return rc.bodies.Request() }

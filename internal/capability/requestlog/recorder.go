@@ -45,6 +45,7 @@ type View interface {
 	CallSource() string
 	ParentRequestID() string
 	UpstreamURL() string
+	W3CTraceID() string
 
 	RequestHeaders() []byte
 	RequestBody() []byte
@@ -91,6 +92,13 @@ func (r *Recorder) Record(ctx context.Context, view View, out fact.Outcome, tl f
 		fr := out.FailReason
 		failPtr = &fr
 	}
+	// The trace-id column is a join key, not an observation: empty stays SQL
+	// NULL (same pointer treatment as the fail reason above), because a
+	// stored empty string would read as a value trace systems could key on.
+	var traceIDPtr *string
+	if id := view.W3CTraceID(); id != "" {
+		traceIDPtr = &id
+	}
 
 	// Compression savings only mean something if the request actually reached an
 	// upstream. One that compressed a body and was then rejected before any
@@ -104,6 +112,7 @@ func (r *Recorder) Record(ctx context.Context, view View, out fact.Outcome, tl f
 
 	row := &model.RequestLog{
 		RequestID:                        view.RequestID(),
+		W3CTraceID:                       traceIDPtr,
 		APIKeyID:                         &apiKeyID,
 		UserID:                           userIDPtr,
 		ModelName:                        view.OriginalModel(),

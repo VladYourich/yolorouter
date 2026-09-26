@@ -87,6 +87,7 @@ func TestExchangeExportsReadersOnly(t *testing.T) {
 		"UserID":                     true,
 		"VisionFallbackModel":        true,
 		"VisionFallbackPrompt":       true,
+		"W3CTraceID":                 true,
 	}
 
 	for name := range got {
