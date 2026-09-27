@@ -25,6 +25,29 @@ import en from '../locales/en'
 import zhCN from '../locales/zh-CN'
 import DefaultLayout from './DefaultLayout.vue'
 
+// The admin-role test below fires the shell's onMounted update check; mock
+// the version endpoint so it resolves instantly instead of attempting a real
+// network request from the test worker.
+vi.mock('../api/system', () => ({
+  getSystemVersion: vi.fn(() =>
+    Promise.resolve({
+      version: 'test',
+      commit: '',
+      build_time: '',
+      go_version: '',
+      goos: '',
+      goarch: '',
+      db_driver: 'sqlite',
+      update_mode: 'disabled',
+      uptime_seconds: 1,
+      latest: '',
+      has_update: false,
+      release_url: '',
+      check_failed: false,
+    }),
+  ),
+}))
+
 // App.vue nests the router-view under n-config-provider > n-message-provider
 // > n-dialog-provider; DefaultLayout's useDialog()/useMessage() throw without
 // that ancestry, so tests mount the shell inside the same providers via a
@@ -63,7 +86,7 @@ function stubMatchMedia(initialMobile: boolean) {
   }
 }
 
-async function mountLayout(locale: 'en' | 'zh-CN') {
+async function mountLayout(locale: 'en' | 'zh-CN', role: 'admin' | 'member' = 'member') {
   const i18n = createI18n({
     legacy: false,
     locale,
@@ -75,8 +98,22 @@ async function mountLayout(locale: 'en' | 'zh-CN') {
     // Every path the shell links to resolves — including /, which both the
     // brand logo RouterLinks and the member sidebar's overview entry target —
     // so RouterLink doesn't warn about unmatched locations (they all render
-    // the same dummy page).
-    routes: ['/', '/analytics', '/costs', '/api-keys'].map((path) => ({
+    // the same dummy page). Admin-role tests need the full admin link set.
+    routes: [
+      '/',
+      '/analytics',
+      '/request-logs',
+      '/costs',
+      '/providers',
+      '/models',
+      '/api-keys',
+      '/rate-limits',
+      '/cost-optimization',
+      '/users',
+      '/oauth-providers',
+      '/settings/general',
+      '/about',
+    ].map((path) => ({
       path,
       component: { template: '<div />' },
     })),
@@ -85,10 +122,12 @@ async function mountLayout(locale: 'en' | 'zh-CN') {
 
   // A member account keeps the shell light for these tests: no admin-only
   // update check fires on mount, and the sidebar still carries the language
-  // entry both fixes exercise.
+  // entry both fixes exercise. Admin-role tests pass role explicitly (their
+  // onMounted update check is fail-open: a network failure just sets the
+  // store's checkFailed flag, never throws).
   const pinia = createPinia()
   setActivePinia(pinia)
-  useAuthStore().$patch({ username: 'tester', role: 'member', isLocal: false })
+  useAuthStore().$patch({ username: 'tester', role, isLocal: false })
 
   const wrapper = mount(Host, {
     attachTo: document.body,
@@ -185,5 +224,38 @@ describe('DefaultLayout mobile shell', () => {
 
     expect(document.querySelector('.n-modal-mask'), 'modal mask gone after shrinking').toBeNull()
     expect(document.querySelector('.option-sheet'), 'mobile sheet did not pop open on its own').toBeNull()
+  })
+})
+
+// TC-11's sidebar arms, pinned after the key-auto-recovery modal entry was
+// removed (its form now lives on /settings/general): the member branch keeps
+// exactly its self-service surface (language entry included — the members'
+// sidebar branch is left untouched), and the admin branch links the General
+// page while the old modal-launcher entry is gone entirely.
+describe('DefaultLayout sidebar after the key-recovery modal removal (TC-11)', () => {
+  it('member sidebar keeps the language entry and no admin-only entries appear', async () => {
+    // Mobile (the beforeEach default): the member nav lives in the drawer,
+    // so open it first — same path the existing shell tests use.
+    wrapper = await mountLayout('en')
+    document.querySelector<HTMLButtonElement>('.mobile-topbar__menu')!.click()
+    await nextTick()
+    const navText = document.querySelector('.sidebar-nav')?.textContent ?? ''
+    expect(navText, 'member sidebar still carries the language entry').toContain(en.nav.language)
+    // The member branch stays the self-service surface: the admin-only
+    // pages/entries must not leak into it.
+    expect(navText).not.toContain(en.nav.generalSettings)
+    expect(navText).not.toContain(en.nav.about)
+    expect(navText).not.toContain('Key Auto Recovery')
+  })
+
+  it('admin sidebar links General and keeps Language, with no modal-launcher entry left', async () => {
+    media.setMobile(false)
+    wrapper = await mountLayout('en', 'admin')
+    const navText = document.querySelector('.sidebar-nav')?.textContent ?? ''
+    expect(navText, 'admin sidebar links the General settings page').toContain(en.nav.generalSettings)
+    expect(navText, 'admin sidebar keeps its own language entry').toContain(en.nav.language)
+    // The removed entry's label — the nav copy itself is deleted from both
+    // locale trees, so this also holds for a zh-CN render.
+    expect(navText).not.toContain('Key Auto Recovery')
   })
 })

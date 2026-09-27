@@ -20,7 +20,6 @@ export default {
   generalSettings: '常规',
   about: '关于',
   language: '语言设置',
-  keyAutoRecovery: 'Key 自动恢复',
   modelPricing: '模型价格',
   comingSoon: '即将上线',
   soonBadge: '即将',

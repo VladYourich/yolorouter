@@ -2,19 +2,26 @@
 
      The General settings page (/settings/general, admin-only like /about):
      the System Settings group's persistent-form home for instance-wide
-     settings. Two items live here today — request log retention and key
-     auto recovery; the language item joins on the same page later.
+     settings. Three items live here — request log retention, language, and
+     key auto recovery.
 
-     Each item is a card with its own load + version-CAS save lifecycle,
-     lifted from the settings modals (OptimizationSettingsModal /
-     VisionFallbackModal / KeyAutoRecoveryModal): the GET is authoritative,
-     the PUT carries its version, and a 409 means another admin committed
-     first — surface it, reload the committed row, let the user review and
-     save again. A successful save also re-reads the GET so the form
-     reflects the committed row, not just what we asked the server to write.
-     Key auto recovery is the modal's form migrated as-is (same utils, same
-     message keys, same bounds); only its housing changed from modal to
-     page. -->
+     The two server-backed items are cards with their own load + version-CAS
+     save lifecycle, lifted from the settings modals (OptimizationSettingsModal
+     / VisionFallbackModal / the key-recovery modal this page replaced): the GET is
+     authoritative, the PUT carries its version, and a 409 means another admin
+     committed first — surface it, reload the committed row, let the user
+     review and save again. A successful save also re-reads the GET so the
+     form reflects the committed row, not just what we asked the server to
+     write. Key auto recovery is the old modal's form migrated as-is (same
+     utils, same message keys, same bounds); only its housing changed from
+     modal to page.
+
+     The language item is different on purpose: it is a personal, per-browser
+     preference, not an instance setting — it never touches the settings API
+     or the database. It reads and writes the locale store (the same store
+     the sidebar Language entry uses), so the two entries stay in sync with
+     no wiring of our own, and picking an option applies immediately (there
+     is nothing to round-trip, so there is no save button either). -->
 <template>
   <div class="common-page">
     <PageHeader
@@ -58,6 +65,31 @@
             {{ t('common.save') }}
           </NButton>
         </div>
+      </NForm>
+    </section>
+
+    <!-- Language: personal, per-browser — reads/writes the locale store the
+         sidebar Language entry also uses (one source of truth), applies on
+         pick. No load state (the store reads synchronously) and no save
+         button (nothing is sent anywhere); no rules/path because a picker
+         over two options cannot produce an invalid value. -->
+    <section class="settings-card">
+      <h2 class="settings-card__title">{{ t('generalSettings.language.title') }}</h2>
+      <p class="settings-card__desc">{{ t('generalSettings.language.desc') }}</p>
+      <NForm require-mark-placement="left">
+        <NFormItem>
+          <template #label>
+            <HelpLabel :tip="t('generalSettings.language.labelTip')">{{
+              t('generalSettings.language.label')
+            }}</HelpLabel>
+          </template>
+          <NSelect
+            class="gs-language__select"
+            :value="localeStore.locale"
+            :options="LOCALES"
+            @update:value="onLanguageSelect"
+          />
+        </NFormItem>
       </NForm>
     </section>
 
@@ -110,6 +142,7 @@ import {
   NForm,
   NFormItem,
   NInputNumber,
+  NSelect,
   NSwitch,
   useMessage,
   type FormInst,
@@ -117,6 +150,8 @@ import {
 } from 'naive-ui'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
+import { useLocaleStore } from '../../store/locale'
+import { LOCALES } from '../../i18n'
 import { APIError, displayMessage } from '../../api/client'
 import {
   getKeyAutoRecovery,
@@ -142,6 +177,22 @@ import {
 
 const { t } = useI18n()
 const message = useMessage()
+
+// --- Language (personal, per-browser) --------------------------------------
+
+// The same store the sidebar Language entry writes through — reading the
+// committed value here and switching through the same action is what keeps
+// the two entries in sync (the store persists to localStorage and flips
+// i18n's global locale, which re-renders this page's copy too).
+const localeStore = useLocaleStore()
+
+function onLanguageSelect(value: string | number) {
+  // NSelect hands back the picked option's value; the options come straight
+  // from LOCALES, so a match is guaranteed — the find only narrows the type
+  // back to Locale.
+  const next = LOCALES.find((l) => l.value === value)
+  if (next) localeStore.setLocale(next.value)
+}
 
 // --- Request log retention ------------------------------------------------
 

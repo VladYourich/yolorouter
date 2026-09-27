@@ -15,4 +15,11 @@ export default {
     retry: 'Retry',
     conflict: 'This setting was changed elsewhere. Reloaded the latest version — review and save again.',
   },
+  language: {
+    title: 'Language',
+    desc: 'Your interface language. A personal preference kept in this browser — it does not reach the database and applies immediately.',
+    label: 'Interface language',
+    labelTip:
+      'Saved per browser, only for you. The sidebar Language entry switches the same stored preference — the two always stay in sync.',
+  },
 }
