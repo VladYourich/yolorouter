@@ -928,3 +928,59 @@ func TestMigration00048KeyAutoRecovery(t *testing.T) {
 	}
 	assertSeeded(t, db, "upgraded database")
 }
+
+// TestMigration00050RequestLogRetention verifies that migration 00050 seeds
+// the request-log-retention setting at the keep-forever default (0) on a
+// fresh database and on an upgraded one alike, and that the upgrade replay
+// leaves pre-existing request_logs rows untouched — the retention setting
+// arriving must never look like (or cause) a data change.
+func TestMigration00050RequestLogRetention(t *testing.T) {
+	assertSeeded := func(t *testing.T, db *sql.DB, context string) {
+		t.Helper()
+		var value string
+		var ver int64
+		err := db.QueryRow("SELECT value, version FROM system_settings WHERE key = 'request_log_retention_days'").Scan(&value, &ver)
+		if err != nil {
+			t.Fatalf("%s: seed row missing: %v", context, err)
+		}
+		if value != "0" {
+			t.Fatalf("%s: seed value = %q, want \"0\" (keep forever)", context, value)
+		}
+		if ver < 1 {
+			t.Fatalf("%s: seed version = %d, want >= 1 (the PUT path refuses version < 1)", context, ver)
+		}
+	}
+
+	// Fresh database: the full chain including 00050 runs.
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	assertSeeded(t, db, "fresh database")
+
+	// Upgrade replay: roll back to 49 (seed row gone), plant a legacy
+	// request_logs row, then re-run — the seed must land on the upgraded
+	// database exactly as on a fresh one, and the legacy row must survive.
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 49); err != nil {
+		t.Fatalf("RollbackTo(49) failed: %v", err)
+	}
+	var remaining string
+	err := db.QueryRow("SELECT value FROM system_settings WHERE key = 'request_log_retention_days'").Scan(&remaining)
+	if err == nil {
+		t.Fatalf("request_log_retention_days still present after rollback: value=%q", remaining)
+	}
+	if _, err := db.Exec(`INSERT INTO request_logs (request_id, model_name, status_code, created_at) VALUES ('req-ret-00050', 'legacy-model', 200, '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("seed legacy request_logs row: %v", err)
+	}
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("re-running migrations failed: %v", err)
+	}
+	assertSeeded(t, db, "upgraded database")
+	var legacyCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE request_id = 'req-ret-00050'").Scan(&legacyCount); err != nil {
+		t.Fatalf("count legacy request_logs row: %v", err)
+	}
+	if legacyCount != 1 {
+		t.Fatalf("legacy request_logs rows after replay = %d, want 1 (upgrade must not touch data)", legacyCount)
+	}
+}

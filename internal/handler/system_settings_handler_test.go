@@ -461,3 +461,247 @@ func TestPutKeyAutoRecoveryConflictEmits11019(t *testing.T) {
 		t.Fatalf("errcode = %d, want 11019 (KeyAutoRecoveryConflict)", resp.Code)
 	}
 }
+
+// --- Request log retention ---------------------------------------------------
+
+// setupRequestLogRetentionRouter seeds the request_log_retention_days row at
+// the migration default (0 = keep forever). The gorm handle comes back too:
+// the fail-open tests need to delete the row out from under the service.
+func setupRequestLogRetentionRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.Exec(`CREATE TABLE system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`)
+	db.Exec(`INSERT INTO system_settings (key, value) VALUES ('request_log_retention_days','0')`)
+	svc := systemsettings.NewSystemSettingsService(db)
+	r := gin.New()
+	r.GET("/api/admin/system-settings/request-log-retention", GetRequestLogRetention(svc))
+	r.PUT("/api/admin/system-settings/request-log-retention", PutRequestLogRetention(svc))
+	return r, db
+}
+
+// getRequestLogRetentionDays is the shared GET-and-extract helper for the
+// retention tests: status must be 200 and the payload's retention_days /
+// version come back for the caller to assert on.
+func getRequestLogRetentionDays(t *testing.T, r *gin.Engine) (int, int64) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/system-settings/request-log-retention", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET: status = %d, body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			RetentionDays int   `json:"retention_days"`
+			Version       int64 `json:"version"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	return resp.Data.RetentionDays, resp.Data.Version
+}
+
+// putRequestLogRetentionRaw issues a PUT with an exact raw JSON body so the
+// invalid-matrix tests control the wire form byte for byte.
+func putRequestLogRetentionRaw(t *testing.T, r *gin.Engine, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("PUT", "/api/admin/system-settings/request-log-retention", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// TestGetRequestLogRetentionReturnsSeededZero pins the seeded read: the
+// migration-planted row reads back as 0 (keep forever) at its seed version.
+func TestGetRequestLogRetentionReturnsSeededZero(t *testing.T) {
+	r, _ := setupRequestLogRetentionRouter(t)
+	days, ver := getRequestLogRetentionDays(t, r)
+	if days != 0 || ver != 1 {
+		t.Fatalf("want 0/v1 seeded, got %d/v%d", days, ver)
+	}
+}
+
+// TestGetRequestLogRetentionMissingRowFailOpensToZero pins the fail-open
+// read on a database that predates the seeding migration: the absent row
+// must read as the keep-forever default (version 0), never as an error —
+// the admin console and the cleanup loop both degrade to "delete nothing".
+func TestGetRequestLogRetentionMissingRowFailOpensToZero(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.Exec(`CREATE TABLE system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`)
+	svc := systemsettings.NewSystemSettingsService(db)
+	r := gin.New()
+	r.GET("/api/admin/system-settings/request-log-retention", GetRequestLogRetention(svc))
+	r.PUT("/api/admin/system-settings/request-log-retention", PutRequestLogRetention(svc))
+
+	days, ver := getRequestLogRetentionDays(t, r)
+	if days != 0 || ver != 0 {
+		t.Fatalf("want 0/v0 (keep-forever default on missing row), got %d/v%d", days, ver)
+	}
+}
+
+// TestPutRequestLogRetentionSuccessAndReadBack pins the write half of the
+// matrix: PUT 30 commits (new version handed back) and the authoritative
+// GET reads 30.
+func TestPutRequestLogRetentionSuccessAndReadBack(t *testing.T) {
+	r, _ := setupRequestLogRetentionRouter(t)
+	w := putRequestLogRetentionRaw(t, r, `{"retention_days":30,"version":1}`)
+	if w.Code != 200 {
+		t.Fatalf("PUT 30: status = %d, body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			RetentionDays int   `json:"retention_days"`
+			Version       int64 `json:"version"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Data.RetentionDays != 30 || resp.Data.Version != 2 {
+		t.Fatalf("want 30/v2, got %d/v%d", resp.Data.RetentionDays, resp.Data.Version)
+	}
+	if days, ver := getRequestLogRetentionDays(t, r); days != 30 || ver != 2 {
+		t.Fatalf("read after PUT: want 30/v2, got %d/v%d", days, ver)
+	}
+}
+
+// TestGetRequestLogRetentionAfterRowsDeletedFailOpensToZero pins the
+// fail-open read after the settings rows are wiped: the read falls back to
+// the keep-forever default (0/v0) instead of erroring, so a damaged
+// settings table can never fail the cleanup loop into deleting anything.
+func TestGetRequestLogRetentionAfterRowsDeletedFailOpensToZero(t *testing.T) {
+	r, db := setupRequestLogRetentionRouter(t)
+	if days, _ := getRequestLogRetentionDays(t, r); days != 0 {
+		t.Fatalf("precondition: seeded read = %d, want 0", days)
+	}
+	if res := db.Exec(`DELETE FROM system_settings`); res.Error != nil {
+		t.Fatalf("wipe settings rows: %v", res.Error)
+	}
+	days, ver := getRequestLogRetentionDays(t, r)
+	if days != 0 || ver != 0 {
+		t.Fatalf("want 0/v0 (fail-open after rows deleted), got %d/v%d", days, ver)
+	}
+}
+
+func TestPutRequestLogRetentionMissingFields400(t *testing.T) {
+	r, _ := setupRequestLogRetentionRouter(t)
+	w := putRequestLogRetentionRaw(t, r, `{}`)
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestPutRequestLogRetentionZeroVersion400 verifies the no-first-write
+// rule: a version of 0 (what a missing-row read reports on a not-yet-
+// migrated database) is rejected, so the row can only ever be created by
+// the seeding migration — the PUT handler stays as strict as the other
+// settings families.
+func TestPutRequestLogRetentionZeroVersion400(t *testing.T) {
+	r, _ := setupRequestLogRetentionRouter(t)
+	w := putRequestLogRetentionRaw(t, r, `{"retention_days":30,"version":0}`)
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestPutRequestLogRetentionLegalDomainAccepted pins the inclusive domain:
+// 0 (keep forever), 1 and 3650 all commit; each accepted PUT advances the
+// version so the next one carries the fresh version.
+func TestPutRequestLogRetentionLegalDomainAccepted(t *testing.T) {
+	r, _ := setupRequestLogRetentionRouter(t)
+	for i, tc := range []struct {
+		days    int
+		version int64
+	}{
+		{days: 0, version: 1},
+		{days: 1, version: 2},
+		{days: 3650, version: 3},
+	} {
+		body, _ := json.Marshal(map[string]interface{}{"retention_days": tc.days, "version": tc.version})
+		req := httptest.NewRequest("PUT", "/api/admin/system-settings/request-log-retention", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("case %d (days=%d): status = %d, want 200, body: %s", i, tc.days, w.Code, w.Body.String())
+		}
+	}
+	if days, _ := getRequestLogRetentionDays(t, r); days != 3650 {
+		t.Fatalf("final read = %d, want 3650", days)
+	}
+}
+
+// TestPutRequestLogRetentionInvalidValuesRejected pins the invalid half of
+// the domain matrix: -1 / 3651 pass JSON binding but are refused by the
+// service-layer bounds check with this setting's own business code (11022);
+// 1.5 / "" / "abc" fail JSON binding outright. Every rejection must leave
+// the stored setting untouched.
+func TestPutRequestLogRetentionInvalidValuesRejected(t *testing.T) {
+	r, _ := setupRequestLogRetentionRouter(t)
+	// Establish a non-zero stored value so "setting unchanged" is a real
+	// assertion (0 is also the default, which would mask a no-op write).
+	if w := putRequestLogRetentionRaw(t, r, `{"retention_days":30,"version":1}`); w.Code != 200 {
+		t.Fatalf("seed PUT 30: status = %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// Integer values outside the domain: 400 carrying errcode 11022.
+	for _, bad := range []string{"-1", "3651"} {
+		w := putRequestLogRetentionRaw(t, r, `{"retention_days":`+bad+`,"version":2}`)
+		if w.Code != 400 {
+			t.Fatalf("days %s: status = %d, want 400, body: %s", bad, w.Code, w.Body.String())
+		}
+		var resp struct {
+			Code int `json:"code"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("days %s: unmarshal: %v", bad, err)
+		}
+		if resp.Code != 11022 {
+			t.Fatalf("days %s: errcode = %d, want 11022 (RequestLogRetentionDaysInvalid)", bad, resp.Code)
+		}
+		if days, ver := getRequestLogRetentionDays(t, r); days != 30 || ver != 2 {
+			t.Fatalf("days %s: setting changed to %d/v%d, want 30/v2 unchanged", bad, days, ver)
+		}
+	}
+
+	// Values that never bind into an int field: rejected by JSON decoding.
+	for _, bad := range []string{`1.5`, `""`, `"abc"`} {
+		w := putRequestLogRetentionRaw(t, r, `{"retention_days":`+bad+`,"version":2}`)
+		if w.Code != 400 {
+			t.Fatalf("days %s: status = %d, want 400, body: %s", bad, w.Code, w.Body.String())
+		}
+		if days, ver := getRequestLogRetentionDays(t, r); days != 30 || ver != 2 {
+			t.Fatalf("days %s: setting changed to %d/v%d, want 30/v2 unchanged", bad, days, ver)
+		}
+	}
+}
+
+// TestPutRequestLogRetentionConflictEmits11021 verifies the 409 response
+// carries errcode 11021 (RequestLogRetentionConflict), distinct from the
+// other settings' conflict codes so the frontend can route the retry to the
+// right control.
+func TestPutRequestLogRetentionConflictEmits11021(t *testing.T) {
+	r, _ := setupRequestLogRetentionRouter(t)
+	w := putRequestLogRetentionRaw(t, r, `{"retention_days":30,"version":99}`)
+	if w.Code != 409 {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	var resp struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Code != 11021 {
+		t.Fatalf("errcode = %d, want 11021 (RequestLogRetentionConflict)", resp.Code)
+	}
+}

@@ -258,3 +258,65 @@ func PutKeyAutoRecovery(svc *systemsettings.SystemSettingsService) gin.HandlerFu
 		response.Success(c, keyAutoRecoveryResponse{Enabled: s.Enabled, IntervalMinutes: s.IntervalMinutes, Version: ver})
 	}
 }
+
+// requestLogRetentionResponse is the handler-facing response DTO with
+// explicit json tags (retention_days/version), same wrapper pattern as the
+// settings families above.
+type requestLogRetentionResponse struct {
+	RetentionDays int   `json:"retention_days"`
+	Version       int64 `json:"version"`
+}
+
+// putRequestLogRetentionRequest: the pointer makes an absent field
+// distinguishable from the legal zero (keep forever), so a partial body
+// cannot silently reset the retention to "never delete".
+type putRequestLogRetentionRequest struct {
+	RetentionDays *int   `json:"retention_days"`
+	Version       *int64 `json:"version"`
+}
+
+// GetRequestLogRetention returns the authoritative global state (DB read,
+// bypassing the cache) so the admin always sees the committed value.
+func GetRequestLogRetention(svc *systemsettings.SystemSettingsService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		s, ver, err := svc.GetRequestLogRetentionForHandler(c.Request.Context())
+		if err != nil {
+			response.InternalError(c, err.Error())
+			return
+		}
+		response.Success(c, requestLogRetentionResponse{RetentionDays: s.Days, Version: ver})
+	}
+}
+
+// PutRequestLogRetention validates + CAS-updates the row. version is
+// required (optimistic lock); retention_days must be present (pointer, zero
+// is a legal value). A non-integer or out-of-domain value and a CAS miss
+// return the settings family's existing 400/409 forms, with this setting's
+// own business codes so the frontend can route retries to the right control.
+func PutRequestLogRetention(svc *systemsettings.SystemSettingsService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req putRequestLogRetentionRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.ParamError(c, err.Error())
+			return
+		}
+		if req.RetentionDays == nil || req.Version == nil || *req.Version < 1 {
+			response.ParamError(c, "retention_days and version (>=1) are both required")
+			return
+		}
+		s, ver, err := svc.UpdateRequestLogRetention(c.Request.Context(), *req.Version, *req.RetentionDays)
+		if err != nil {
+			switch {
+			case errors.Is(err, errcode.ErrRequestLogRetentionConflict):
+				// 409 is not produced by httpStatusForCode's range mapping; set it explicitly.
+				response.ErrorStatus(c, http.StatusConflict, errcode.RequestLogRetentionConflict, errcode.GetMessage(errcode.RequestLogRetentionConflict))
+			case errors.Is(err, errcode.ErrRequestLogRetentionDaysInvalid):
+				response.Error(c, errcode.RequestLogRetentionDaysInvalid, errcode.GetMessage(errcode.RequestLogRetentionDaysInvalid))
+			default:
+				response.InternalError(c, err.Error())
+			}
+			return
+		}
+		response.Success(c, requestLogRetentionResponse{RetentionDays: s.Days, Version: ver})
+	}
+}

@@ -414,3 +414,31 @@ func TestMemberSessionRejectedFromKeyAutoRecoverySetting(t *testing.T) {
 		t.Fatalf("admin GET: status = %d, want 200, body: %s", w.Code, w.Body.String())
 	}
 }
+
+// TestMemberSessionRejectedFromRequestLogRetentionSetting pins the write
+// side of the admin-only contract for the request-log-retention setting,
+// same shape as the key-auto-recovery assertion above: the conformance
+// sweep classifies GET routes only, so the PUT needs its own assertion — a
+// member session must be turned away from BOTH verbs. Retention is an
+// operator-wide data-governance control, not a per-account view.
+func TestMemberSessionRejectedFromRequestLogRetentionSetting(t *testing.T) {
+	f := newMemberScopeFixture(t)
+
+	w := f.do(t, http.MethodGet, "/api/admin/system-settings/request-log-retention", "", f.aliceCk)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("member GET: status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+
+	w = f.do(t, http.MethodPut, "/api/admin/system-settings/request-log-retention",
+		`{"retention_days":30,"version":1}`, f.aliceCk)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("member PUT: status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+
+	// The admin session reaches the same setting — the 403s above are the
+	// role check, not a broken route.
+	w = f.do(t, http.MethodGet, "/api/admin/system-settings/request-log-retention", "", f.adminCk)
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin GET: status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+}

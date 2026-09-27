@@ -944,3 +944,143 @@ func TestKeyAutoRecoveryCacheSlotIsolation(t *testing.T) {
 		t.Fatalf("fresh CSP read must not be affected by the KAR failure window: %v", err)
 	}
 }
+
+// --- Request log retention ---------------------------------------------------
+
+// newSvcTestDBWithRetention returns a test DB with the
+// request_log_retention_days row seeded at the migration default: 0 (keep
+// forever), version 1.
+func newSvcTestDBWithRetention(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := newSvcTestDB(t)
+	db.Exec(`INSERT INTO system_settings (key, value) VALUES ('request_log_retention_days','0')`)
+	return db
+}
+
+// TestRequestLogRetentionReadReturnsSeededDefault verifies the cold-cache
+// read path primes from the seeded 0 row.
+func TestRequestLogRetentionReadReturnsSeededDefault(t *testing.T) {
+	svc := NewSystemSettingsService(newSvcTestDBWithRetention(t))
+	s, ver, err := svc.GetRequestLogRetention(context.Background())
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if s.Days != 0 || ver != 1 {
+		t.Fatalf("want 0/v1, got %+v v%d", s, ver)
+	}
+}
+
+// TestRequestLogRetentionMissingRowsReturnDefault verifies that a
+// not-yet-migrated database (row absent) reads as the keep-forever default
+// with version 0 — the fallback path only; the PUT handler still refuses
+// version < 1, so the row can only ever be created by the seeding migration.
+func TestRequestLogRetentionMissingRowsReturnDefault(t *testing.T) {
+	svc := NewSystemSettingsService(newSvcTestDB(t)) // no retention row seeded
+	s, ver, err := svc.GetRequestLogRetention(context.Background())
+	if err != nil {
+		t.Fatalf("read on missing rows: want nil err, got %v", err)
+	}
+	if s.Days != 0 || ver != 0 {
+		t.Fatalf("want 0/v0 (keep-forever default), got %+v v%d", s, ver)
+	}
+}
+
+// TestRequestLogRetentionCorruptRowFailOpensToDefault pins the fail-open
+// contract on a failing read: a corrupt stored value surfaces as a
+// repository error, and the cached read answers with the keep-forever
+// default instead of propagating a zero that could be mistaken for a
+// configured value or blocking the caller — nothing is ever deleted
+// because the settings row went bad.
+func TestRequestLogRetentionCorruptRowFailOpensToDefault(t *testing.T) {
+	db := newSvcTestDBWithRetention(t)
+	db.Exec(`UPDATE system_settings SET value = 'not-a-number' WHERE key = 'request_log_retention_days'`)
+	svc := NewSystemSettingsService(db)
+	s, _, err := svc.GetRequestLogRetention(context.Background())
+	if err == nil {
+		t.Fatal("want the underlying read error surfaced alongside the fail-open value")
+	}
+	if s.Days != 0 {
+		t.Fatalf("fail-open value = %+v, want the keep-forever default (0)", s)
+	}
+}
+
+// TestRequestLogRetentionUpdatePublishesImmediately verifies that a CAS
+// update publishes the new snapshot to the cache so the next cleanup-loop
+// read sees it without an invalidate round-trip.
+func TestRequestLogRetentionUpdatePublishesImmediately(t *testing.T) {
+	svc := NewSystemSettingsService(newSvcTestDBWithRetention(t))
+	got, ver, err := svc.UpdateRequestLogRetention(context.Background(), 1, 30)
+	if err != nil || got.Days != 30 || ver != 2 {
+		t.Fatalf("update: got %+v v%d err=%v", got, ver, err)
+	}
+	// Cached read sees the new value immediately.
+	s, _, err := svc.GetRequestLogRetention(context.Background())
+	if err != nil || s.Days != 30 {
+		t.Fatalf("read after update: want 30, got %+v err=%v", s, err)
+	}
+}
+
+// TestRequestLogRetentionUpdateConflict verifies the CAS conflict path: a
+// second save with the stale version must return
+// ErrRequestLogRetentionConflict.
+func TestRequestLogRetentionUpdateConflict(t *testing.T) {
+	svc := NewSystemSettingsService(newSvcTestDBWithRetention(t))
+	if _, _, err := svc.UpdateRequestLogRetention(context.Background(), 1, 30); err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	_, _, err := svc.UpdateRequestLogRetention(context.Background(), 1, 7)
+	if !errors.Is(err, errcode.ErrRequestLogRetentionConflict) {
+		t.Fatalf("want ErrRequestLogRetentionConflict, got %v", err)
+	}
+}
+
+// TestRequestLogRetentionRejectsDaysOutOfBounds verifies the days domain
+// (whole days, 0..3650) at the edges: the inclusive endpoints pass, and
+// negative / 3651 are rejected with the setting's own validation error —
+// and the rejection leaves the stored value untouched.
+func TestRequestLogRetentionRejectsDaysOutOfBounds(t *testing.T) {
+	for _, bad := range []int{-1, 3651} {
+		svc := NewSystemSettingsService(newSvcTestDBWithRetention(t))
+		_, _, err := svc.UpdateRequestLogRetention(context.Background(), 1, bad)
+		if !errors.Is(err, errcode.ErrRequestLogRetentionDaysInvalid) {
+			t.Fatalf("days %d: want ErrRequestLogRetentionDaysInvalid, got %v", bad, err)
+		}
+		s, _, rerr := svc.GetRequestLogRetentionForHandler(context.Background())
+		if rerr != nil || s.Days != 0 {
+			t.Fatalf("days %d: stored value after rejection = %+v err=%v, want 0 unchanged", bad, s, rerr)
+		}
+	}
+	// The inclusive endpoints pass; each accepted update advances the
+	// version, so the second save carries the first one's new version.
+	svc := NewSystemSettingsService(newSvcTestDBWithRetention(t))
+	if _, ver, err := svc.UpdateRequestLogRetention(context.Background(), 1, 0); err != nil || ver != 2 {
+		t.Fatalf("days 0: want accepted at v2, got ver=%d err=%v", ver, err)
+	}
+	if _, ver, err := svc.UpdateRequestLogRetention(context.Background(), 2, 3650); err != nil || ver != 3 {
+		t.Fatalf("days 3650: want accepted at v3, got ver=%d err=%v", ver, err)
+	}
+}
+
+// TestRequestLogRetentionHandlerReadBypassesCache verifies that
+// GetRequestLogRetentionForHandler reads straight from the DB (ignoring the
+// cache) so the admin always sees authoritative state.
+func TestRequestLogRetentionHandlerReadBypassesCache(t *testing.T) {
+	db := newSvcTestDBWithRetention(t)
+	svc := NewSystemSettingsService(db)
+
+	// Prime the cache with the seeded 0/v1.
+	if s, _, err := svc.GetRequestLogRetention(context.Background()); err != nil || s.Days != 0 {
+		t.Fatalf("prime read: %+v err=%v", s, err)
+	}
+
+	// Mutate the DB OUT FROM UNDER the cache.
+	if res := db.Exec(`UPDATE system_settings SET value='30' WHERE key='request_log_retention_days'`); res.Error != nil {
+		t.Fatalf("raw update: %v", res.Error)
+	}
+
+	// The handler read must see 30 even though the cache still holds 0.
+	s, ver, err := svc.GetRequestLogRetentionForHandler(context.Background())
+	if err != nil || s.Days != 30 || ver != 1 {
+		t.Fatalf("handler read: want 30/v1, got %+v v%d err=%v", s, ver, err)
+	}
+}

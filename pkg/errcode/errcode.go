@@ -55,6 +55,8 @@ const (
 	VisionFallbackModelUnknown     = 11018 // vision_fallback_model names a model this gateway has no record of
 	KeyAutoRecoveryConflict        = 11019 // optimistic-lock CAS miss on the key_auto_recovery settings pair PUT (another writer committed first)
 	KeyAutoRecoveryIntervalInvalid = 11020 // key_auto_recovery interval_minutes is not a whole number of minutes within [1, 1440]
+	RequestLogRetentionConflict    = 11021 // optimistic-lock CAS miss on the request_log_retention_days PUT (another writer committed first)
+	RequestLogRetentionDaysInvalid = 11022 // request log retention_days is not a whole number of days within [0, 3650]
 
 	// === Provider errors (12xxx) ===
 	ProviderNotFound   = 12001
@@ -186,6 +188,8 @@ var ErrorMessages = map[int]string{
 	VisionFallbackModelUnknown:     "vision fallback model is not a model configured on this gateway",
 	KeyAutoRecoveryConflict:        "key auto recovery setting was modified concurrently, please refresh and retry",
 	KeyAutoRecoveryIntervalInvalid: "key auto recovery interval must be a whole number of minutes between 1 and 1440",
+	RequestLogRetentionConflict:    "request log retention setting was modified concurrently, please refresh and retry",
+	RequestLogRetentionDaysInvalid: "request log retention must be a whole number of days between 0 and 3650 (0 keeps logs forever)",
 
 	ProviderNotFound:         "provider not found",
 	ProviderNameTaken:        "provider name already taken",
@@ -280,6 +284,8 @@ var (
 	ErrVisionFallbackModelUnknown     = errors.New(ErrorMessages[VisionFallbackModelUnknown])
 	ErrKeyAutoRecoveryConflict        = errors.New(ErrorMessages[KeyAutoRecoveryConflict])
 	ErrKeyAutoRecoveryIntervalInvalid = errors.New(ErrorMessages[KeyAutoRecoveryIntervalInvalid])
+	ErrRequestLogRetentionConflict    = errors.New(ErrorMessages[RequestLogRetentionConflict])
+	ErrRequestLogRetentionDaysInvalid = errors.New(ErrorMessages[RequestLogRetentionDaysInvalid])
 
 	ErrProviderNotFound         = errors.New(ErrorMessages[ProviderNotFound])
 	ErrProviderNameTaken        = errors.New(ErrorMessages[ProviderNameTaken])

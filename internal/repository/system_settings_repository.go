@@ -393,3 +393,61 @@ func UpdateKeyAutoRecovery(db *gorm.DB, expectedVersion int64, enabled bool, int
 	}
 	return settings.KeyAutoRecoverySetting{Enabled: enabled, IntervalMinutes: intervalMinutes}, newVersion, nil
 }
+
+// requestLogRetentionDaysKey is the request-log retention setting: a single
+// system_settings row seeded by migration 00050, same single-row contract as
+// input_compression_enabled.
+const requestLogRetentionDaysKey = "request_log_retention_days"
+
+// GetRequestLogRetention reads the single request_log_retention_days row.
+// A missing row (a database migrated before 00050, where seeding has not
+// run yet) degrades to the shipped keep-forever default rather than
+// erroring — the cleanup loop's read path must never fail-closed into
+// deleting anything. A non-integer or negative value is corrupt data and
+// surfaces as an error. The days deliberately carry NO upper bound here:
+// the 0..3650 domain is the write path's rule (service-layer validation on
+// every update), and a hand-edited oversized value is honored as "retain
+// everything for now" instead of being treated as corruption.
+func GetRequestLogRetention(db *gorm.DB) (settings.RequestLogRetentionSetting, int64, error) {
+	var row struct {
+		Value   string
+		Version int64
+	}
+	if err := db.Table("system_settings").
+		Select("value, version").
+		Where("key = ?", requestLogRetentionDaysKey).
+		Take(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return settings.DefaultRequestLogRetentionSetting(), 0, nil
+		}
+		return settings.DefaultRequestLogRetentionSetting(), 0, err
+	}
+	n, err := strconv.Atoi(row.Value)
+	if err != nil || n < 0 {
+		return settings.DefaultRequestLogRetentionSetting(), 0, fmt.Errorf("system_settings: corrupt %s value %q", requestLogRetentionDaysKey, row.Value)
+	}
+	return settings.RequestLogRetentionSetting{Days: n}, row.Version, nil
+}
+
+// UpdateRequestLogRetention CAS-updates the single request_log_retention_days
+// row, same statement shape as UpdateInputCompression: RowsAffected == 1
+// means the CAS held and the row is now at expectedVersion+1; anything else
+// means another writer committed first => conflict. Returns the committed
+// value + new version so the handler can hand the fresh version back to the
+// caller; a second save with the stale version would otherwise always
+// conflict.
+func UpdateRequestLogRetention(db *gorm.DB, expectedVersion int64, days int) (settings.RequestLogRetentionSetting, int64, error) {
+	res := db.Table("system_settings").
+		Where("key = ? AND version = ?", requestLogRetentionDaysKey, expectedVersion).
+		Updates(map[string]interface{}{
+			"value":   strconv.Itoa(days),
+			"version": gorm.Expr("version + 1"),
+		})
+	if res.Error != nil {
+		return settings.RequestLogRetentionSetting{}, 0, res.Error
+	}
+	if res.RowsAffected != 1 {
+		return settings.RequestLogRetentionSetting{}, 0, errcode.ErrRequestLogRetentionConflict
+	}
+	return settings.RequestLogRetentionSetting{Days: days}, expectedVersion + 1, nil
+}

@@ -35,10 +35,11 @@ const refreshFailureTTL = 5 * time.Second
 // Cache keys — the singleflight group and the entries map are both keyed by
 // these strings, so each setting gets its own collapse lane and cache slot.
 const (
-	cspCacheKey              = "csp"
-	inputCompressionCacheKey = "input_compression"
-	visionFallbackCacheKey   = "vision_fallback"
-	keyAutoRecoveryCacheKey  = "key_auto_recovery"
+	cspCacheKey                 = "csp"
+	inputCompressionCacheKey    = "input_compression"
+	visionFallbackCacheKey      = "vision_fallback"
+	keyAutoRecoveryCacheKey     = "key_auto_recovery"
+	requestLogRetentionCacheKey = "request_log_retention"
 )
 
 // Bounds for the key-auto-recovery probe interval, in whole minutes. One
@@ -49,6 +50,15 @@ const (
 const (
 	MinKeyAutoRecoveryIntervalMinutes = 1
 	MaxKeyAutoRecoveryIntervalMinutes = 1440
+)
+
+// Bounds for the request-log rolling retention, in whole days. Zero is the
+// shipped keep-forever default and stays legal; ten years is the ceiling so
+// a typo cannot silently pin the cleanup loop at "never delete" forever.
+// Enforced in the service layer so the handler PUT and any internal writer
+// hit the same rule.
+const (
+	MaxRequestLogRetentionDays = 3650
 )
 
 // settingEntry holds the cached state for one setting key. The cache is shared
@@ -110,10 +120,11 @@ func NewSystemSettingsService(db *gorm.DB) *SystemSettingsService {
 	return &SystemSettingsService{
 		db: db,
 		entries: map[string]*settingEntry{
-			cspCacheKey:              {},
-			inputCompressionCacheKey: {},
-			visionFallbackCacheKey:   {},
-			keyAutoRecoveryCacheKey:  {},
+			cspCacheKey:                 {},
+			inputCompressionCacheKey:    {},
+			visionFallbackCacheKey:      {},
+			keyAutoRecoveryCacheKey:     {},
+			requestLogRetentionCacheKey: {},
 		},
 	}
 }
@@ -136,6 +147,11 @@ func (s *SystemSettingsService) visionFallbackEntry() *settingEntry {
 // keyAutoRecoveryEntry returns the key-auto-recovery cache slot.
 func (s *SystemSettingsService) keyAutoRecoveryEntry() *settingEntry {
 	return s.entries[keyAutoRecoveryCacheKey]
+}
+
+// requestLogRetentionEntry returns the request-log-retention cache slot.
+func (s *SystemSettingsService) requestLogRetentionEntry() *settingEntry {
+	return s.entries[requestLogRetentionCacheKey]
 }
 
 // readCached is the shared hot-path read for any registered setting. It serves
@@ -428,5 +444,47 @@ func (s *SystemSettingsService) UpdateKeyAutoRecovery(ctx context.Context, expec
 		return settings.KeyAutoRecoverySetting{}, 0, err
 	}
 	s.publishIfNewer(s.keyAutoRecoveryEntry(), got, ver)
+	return got, ver, nil
+}
+
+// --- Request log retention --------------------------------------------------
+
+// GetRequestLogRetention returns the cached snapshot (non-blocking, fail-open
+// to the shipped keep-forever default) — the background cleanup loop's read.
+// On cold cache or stale snapshot it triggers a singleflight refresh with a
+// strict short timeout; on failure it returns last-known-good + error.
+func (s *SystemSettingsService) GetRequestLogRetention(ctx context.Context) (settings.RequestLogRetentionSetting, int64, error) {
+	v, ver, err := s.readCached(ctx, requestLogRetentionCacheKey, s.requestLogRetentionEntry(),
+		func(ctx context.Context) (any, int64, error) {
+			snap, v, e := repository.GetRequestLogRetention(s.db.WithContext(ctx))
+			return snap, v, e
+		},
+		settings.DefaultRequestLogRetentionSetting())
+	if err != nil {
+		return v.(settings.RequestLogRetentionSetting), ver, err
+	}
+	return v.(settings.RequestLogRetentionSetting), ver, nil
+}
+
+// GetRequestLogRetentionForHandler is the authoritative read for the handler
+// GET: straight from the DB, bound to the request ctx so a client disconnect
+// cancels the in-flight DB call.
+func (s *SystemSettingsService) GetRequestLogRetentionForHandler(ctx context.Context) (settings.RequestLogRetentionSetting, int64, error) {
+	return repository.GetRequestLogRetention(s.db.WithContext(ctx))
+}
+
+// UpdateRequestLogRetention validates the days domain (whole days, 0..3650),
+// CAS-updates the row, and publishes the committed snapshot to the cache so
+// the cleanup loop sees the change within one heartbeat + cache TTL, without
+// a restart.
+func (s *SystemSettingsService) UpdateRequestLogRetention(ctx context.Context, expectedVersion int64, days int) (settings.RequestLogRetentionSetting, int64, error) {
+	if days < 0 || days > MaxRequestLogRetentionDays {
+		return settings.RequestLogRetentionSetting{}, 0, errcode.ErrRequestLogRetentionDaysInvalid
+	}
+	got, ver, err := repository.UpdateRequestLogRetention(s.db.WithContext(ctx), expectedVersion, days)
+	if err != nil {
+		return settings.RequestLogRetentionSetting{}, 0, err
+	}
+	s.publishIfNewer(s.requestLogRetentionEntry(), got, ver)
 	return got, ver, nil
 }

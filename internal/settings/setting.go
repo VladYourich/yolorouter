@@ -38,6 +38,30 @@ type KeyAutoRecoverySetting struct {
 // monthly reset window while keeping probe traffic negligible.
 const KeyAutoRecoveryDefaultIntervalMinutes = 30
 
+// RequestLogRetentionSetting is the typed snapshot of the global request-log
+// rolling retention configuration: how many days of request_logs (and their
+// body rows / stream files) the background cleanup keeps. Zero means keep
+// forever — the shipped default, so an existing deployment changes nothing
+// on upgrade. It intentionally has NO json tags — it is an internal transfer
+// type; handlers wrap it in their own response DTO with json tags.
+type RequestLogRetentionSetting struct {
+	Days int
+}
+
+// RequestLogRetentionDefaultDays is the shipped default retention (keep
+// forever), mirrored by the seeding migration (goose SQL cannot reference
+// Go constants).
+const RequestLogRetentionDefaultDays = 0
+
+// DefaultRequestLogRetentionSetting returns the shipped default (keep
+// forever). It is served when the row is absent — a database that predates
+// the seeding migration — and as the fail-open value on a cold-cache
+// refresh failure, so both paths behave exactly like a freshly seeded
+// deployment and nothing is ever deleted by accident.
+func DefaultRequestLogRetentionSetting() RequestLogRetentionSetting {
+	return RequestLogRetentionSetting{Days: RequestLogRetentionDefaultDays}
+}
+
 // DefaultKeyAutoRecoverySetting returns the shipped default (enabled, 30
 // minutes). It is served when the rows are absent — a database that
 // predates the seeding migration — and as the fail-open value on a
