@@ -18,6 +18,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/keyrecovery"
 	"github.com/yolorouter/yolorouter/internal/pricecatalog"
 	"github.com/yolorouter/yolorouter/internal/protocols"
+	"github.com/yolorouter/yolorouter/internal/retention"
 	"github.com/yolorouter/yolorouter/internal/router"
 	"github.com/yolorouter/yolorouter/internal/service/modeladmin"
 	"github.com/yolorouter/yolorouter/internal/service/provider"
@@ -374,6 +375,34 @@ func runServe(ctx context.Context, args []string) error {
 	defer func() {
 		recoveryCancel()
 		stopRecovery()
+	}()
+
+	// The request-log retention loop: every heartbeat it re-reads the
+	// rolling-retention setting (0 = keep forever, the shipped default) and,
+	// when a positive window is configured, drives one bounded sweep that
+	// removes expired request_logs rows together with their body rows and
+	// stream capture files under bodiesDir above. Rounds are capped by the
+	// sweep engine, so shrinking the retention drains the resulting backlog
+	// gradually over successive rounds instead of one giant transaction
+	// pinning the audit tables. Started here, after the migration has seeded
+	// the setting, for the same reason the loops above wait: a round running
+	// against an unmigrated schema would only fail its query every beat.
+	// Like the recovery loop, it holds its own settings-service instance so
+	// the loop's cached snapshot reads stay off the request-path instance;
+	// both caches read the same rows, and a saved change reaches the loop
+	// within one cache TTL plus one heartbeat. Runs on a context derived
+	// from serve's own ctx and is awaited by a deferred cancel + stop so
+	// the goroutine exits before the process does.
+	retentionLoop := retention.NewLoop(retention.Config{
+		DB:        app.DB,
+		Settings:  systemsettings.NewSystemSettingsService(app.DB),
+		BodiesDir: bodiesDir,
+	})
+	retentionCtx, retentionCancel := context.WithCancel(ctx)
+	stopRetention := retentionLoop.Start(retentionCtx)
+	defer func() {
+		retentionCancel()
+		stopRetention()
 	}()
 
 	serveErrCh := make(chan error, 1)
