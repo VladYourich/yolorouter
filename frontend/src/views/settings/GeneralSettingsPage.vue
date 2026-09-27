@@ -1,0 +1,368 @@
+<!-- frontend/src/views/settings/GeneralSettingsPage.vue
+
+     The General settings page (/settings/general, admin-only like /about):
+     the System Settings group's persistent-form home for instance-wide
+     settings. Two items live here today — request log retention and key
+     auto recovery; the language item joins on the same page later.
+
+     Each item is a card with its own load + version-CAS save lifecycle,
+     lifted from the settings modals (OptimizationSettingsModal /
+     VisionFallbackModal / KeyAutoRecoveryModal): the GET is authoritative,
+     the PUT carries its version, and a 409 means another admin committed
+     first — surface it, reload the committed row, let the user review and
+     save again. A successful save also re-reads the GET so the form
+     reflects the committed row, not just what we asked the server to write.
+     Key auto recovery is the modal's form migrated as-is (same utils, same
+     message keys, same bounds); only its housing changed from modal to
+     page. -->
+<template>
+  <div class="common-page">
+    <PageHeader
+      :eyebrow="t('nav.groupSystem')"
+      :title="t('nav.generalSettings')"
+      :description="t('generalSettings.pageDescription')"
+    />
+
+    <!-- Request log retention -->
+    <section class="settings-card">
+      <h2 class="settings-card__title">{{ t('generalSettings.retention.title') }}</h2>
+      <p class="settings-card__desc">{{ t('generalSettings.retention.desc') }}</p>
+      <div v-if="retentionLoad === 'loading'" class="settings-card__state">{{ t('common.loading') }}</div>
+      <div v-else-if="retentionLoad === 'error'" class="settings-card__state settings-card__state--err">
+        <span>{{ t('generalSettings.retention.loadFailed') }}</span>
+        <NButton size="small" @click="loadRetention">{{ t('generalSettings.retention.retry') }}</NButton>
+      </div>
+      <!-- Validation runs through NForm rules (blur trigger) so the red
+           feedback appears inline on leaving the field; onSave re-validates
+           via formRef.validate() before anything is sent. -->
+      <NForm v-else ref="retentionFormRef" :model="retentionForm" :rules="retentionRules" require-mark-placement="left">
+        <NFormItem path="days">
+          <template #label>
+            <HelpLabel :tip="t('generalSettings.retention.daysTip')">{{ t('generalSettings.retention.days') }}</HelpLabel>
+          </template>
+          <!-- No :min/:max/:precision on the input itself on purpose:
+               NInputNumber clamps out-of-range values silently on blur and
+               would round a decimal the same way, while this form must reject
+               both with an explicit message (the rule below) so the admin
+               knows what was wrong instead of discovering a changed value. -->
+          <NInputNumber v-model:value="retentionForm.days" class="gs-retention__days" />
+        </NFormItem>
+        <div class="settings-card__actions">
+          <NButton
+            type="primary"
+            class="gs-retention__save"
+            :loading="retentionSaving"
+            :disabled="retentionLoad !== 'ready'"
+            @click="saveRetention"
+          >
+            {{ t('common.save') }}
+          </NButton>
+        </div>
+      </NForm>
+    </section>
+
+    <!-- Key auto recovery: the sidebar modal's form migrated onto this page.
+         Same utils (utils/keyAutoRecovery), same i18n message keys, same
+         [1, 1440] bounds — only the housing changed. -->
+    <section class="settings-card">
+      <h2 class="settings-card__title">{{ t('keyAutoRecovery.title') }}</h2>
+      <p class="settings-card__desc">{{ t('keyAutoRecovery.desc') }}</p>
+      <div v-if="recoveryLoad === 'loading'" class="settings-card__state">{{ t('common.loading') }}</div>
+      <div v-else-if="recoveryLoad === 'error'" class="settings-card__state settings-card__state--err">
+        <span>{{ t('keyAutoRecovery.loadFailed') }}</span>
+        <NButton size="small" @click="loadRecovery">{{ t('keyAutoRecovery.retry') }}</NButton>
+      </div>
+      <NForm v-else ref="recoveryFormRef" :model="recoveryForm" :rules="recoveryRules" require-mark-placement="left">
+        <NFormItem path="enabled">
+          <template #label>
+            <HelpLabel :tip="t('keyAutoRecovery.enabledTip')">{{ t('keyAutoRecovery.enabled') }}</HelpLabel>
+          </template>
+          <NSwitch v-model:value="recoveryForm.enabled" class="gs-recovery__switch" />
+        </NFormItem>
+        <NFormItem path="interval">
+          <template #label>
+            <HelpLabel :tip="t('keyAutoRecovery.intervalTip')">{{ t('keyAutoRecovery.interval') }}</HelpLabel>
+          </template>
+          <!-- Same no-clamp contract as the retention input above. -->
+          <NInputNumber v-model:value="recoveryForm.interval" class="gs-recovery__interval" />
+        </NFormItem>
+        <div class="settings-card__actions">
+          <NButton
+            type="primary"
+            class="gs-recovery__save"
+            :loading="recoverySaving"
+            :disabled="recoveryLoad !== 'ready'"
+            @click="saveRecovery"
+          >
+            {{ t('common.save') }}
+          </NButton>
+        </div>
+      </NForm>
+    </section>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import {
+  NButton,
+  NForm,
+  NFormItem,
+  NInputNumber,
+  NSwitch,
+  useMessage,
+  type FormInst,
+  type FormRules,
+} from 'naive-ui'
+import PageHeader from '../../components/PageHeader.vue'
+import HelpLabel from '../../components/HelpLabel.vue'
+import { APIError, displayMessage } from '../../api/client'
+import {
+  getKeyAutoRecovery,
+  getRequestLogRetention,
+  updateKeyAutoRecovery,
+  updateRequestLogRetention,
+} from '../../api/systemSettings'
+import { KEY_AUTO_RECOVERY_CONFLICT, REQUEST_LOG_RETENTION_CONFLICT } from '../../api/errcodes'
+import {
+  checkRetentionDays,
+  retentionFormFromSetting,
+  retentionIssueMessageKey,
+  retentionSavePlan,
+  type RetentionForm,
+} from '../../utils/requestLogRetention'
+import {
+  checkIntervalMinutes,
+  intervalIssueMessageKey,
+  keyRecoveryFormFromSetting,
+  keyRecoverySavePlan,
+  type KeyRecoveryForm,
+} from '../../utils/keyAutoRecovery'
+
+const { t } = useI18n()
+const message = useMessage()
+
+// --- Request log retention ------------------------------------------------
+
+// Three-state load, same as the settings modals: the form stays hidden until
+// the GET resolves so a failed load can't expose editable defaults that
+// would overwrite the real row on save.
+const retentionLoad = ref<'loading' | 'error' | 'ready'>('loading')
+const retentionSaving = ref(false)
+const retentionVersion = ref(0)
+const retentionFormRef = ref<FormInst | null>(null)
+const retentionForm = reactive<RetentionForm>({ days: null })
+
+// The rule's message is picked by the pure validator's issue, so the bounds
+// live in exactly one place (utils/requestLogRetention). The computed reads
+// retentionForm.days through retentionValidationMessage(), so every
+// keystroke rebuilds the rule with the message for the value now in the box
+// (empty for a valid one) — a message captured once would go stale after the
+// first edit.
+const retentionRules = computed<FormRules>(() => ({
+  days: [
+    {
+      required: true,
+      validator: (_rule, value: number | null) => checkRetentionDays(value).ok,
+      message: retentionValidationMessage(),
+      trigger: ['blur'],
+    },
+  ],
+}))
+
+function retentionValidationMessage(): string {
+  const check = checkRetentionDays(retentionForm.days)
+  return check.ok ? '' : t(retentionIssueMessageKey(check.issue))
+}
+
+async function loadRetention() {
+  retentionLoad.value = 'loading'
+  try {
+    const s = await getRequestLogRetention()
+    const next = retentionFormFromSetting(s)
+    retentionForm.days = next.days
+    retentionVersion.value = s.version
+    retentionFormRef.value?.restoreValidation()
+    retentionLoad.value = 'ready'
+  } catch (err) {
+    retentionLoad.value = 'error'
+    if (!(err instanceof APIError)) message.error(displayMessage(err, t))
+  }
+}
+
+async function saveRetention() {
+  // Nothing loaded means nothing valid to save: a PUT here would carry
+  // version 0 and bounce off the backend's version check anyway.
+  if (retentionLoad.value !== 'ready' || retentionSaving.value) return
+  try {
+    await retentionFormRef.value?.validate()
+  } catch {
+    return
+  }
+  const plan = retentionSavePlan({ days: retentionForm.days }, retentionVersion.value)
+  if (!plan.ok) {
+    // Defensive double lock: validate() already gates on the same rule, so
+    // this only fires if the form ref was somehow absent above.
+    message.error(t(retentionIssueMessageKey(plan.issue)))
+    return
+  }
+  retentionSaving.value = true
+  try {
+    await updateRequestLogRetention(plan.payload)
+    message.success(t('generalSettings.retention.saved'))
+    // Re-read the committed row (not just the PUT echo) so the form shows
+    // the authoritative state — the same authority contract as the GET on
+    // load, and it refreshes the version for any subsequent save.
+    await loadRetention()
+  } catch (err) {
+    if (err instanceof APIError && err.code === REQUEST_LOG_RETENTION_CONFLICT) {
+      // Concurrent edit — surface it and reload the committed row (which
+      // also re-syncs the form and its version).
+      message.error(t('generalSettings.retention.conflict'))
+      void loadRetention()
+    } else {
+      message.error(displayMessage(err, t))
+    }
+  } finally {
+    retentionSaving.value = false
+  }
+}
+
+// --- Key auto recovery ----------------------------------------------------
+
+// Identical lifecycle to the retention item above; only the setting family
+// (form shape, API, conflict code) differs. The interval bounds and their
+// messages stay owned by utils/keyAutoRecovery — the module the migrated
+// modal already used, unchanged.
+const recoveryLoad = ref<'loading' | 'error' | 'ready'>('loading')
+const recoverySaving = ref(false)
+const recoveryVersion = ref(0)
+const recoveryFormRef = ref<FormInst | null>(null)
+const recoveryForm = reactive<KeyRecoveryForm>({ enabled: false, interval: null })
+
+const recoveryRules = computed<FormRules>(() => ({
+  interval: [
+    {
+      required: true,
+      validator: (_rule, value: number | null) => checkIntervalMinutes(value).ok,
+      message: intervalValidationMessage(),
+      trigger: ['blur'],
+    },
+  ],
+}))
+
+function intervalValidationMessage(): string {
+  const check = checkIntervalMinutes(recoveryForm.interval)
+  return check.ok ? '' : t(intervalIssueMessageKey(check.issue))
+}
+
+async function loadRecovery() {
+  recoveryLoad.value = 'loading'
+  try {
+    const s = await getKeyAutoRecovery()
+    const next = keyRecoveryFormFromSetting(s)
+    recoveryForm.enabled = next.enabled
+    recoveryForm.interval = next.interval
+    recoveryVersion.value = s.version
+    recoveryFormRef.value?.restoreValidation()
+    recoveryLoad.value = 'ready'
+  } catch (err) {
+    recoveryLoad.value = 'error'
+    if (!(err instanceof APIError)) message.error(displayMessage(err, t))
+  }
+}
+
+async function saveRecovery() {
+  if (recoveryLoad.value !== 'ready' || recoverySaving.value) return
+  try {
+    await recoveryFormRef.value?.validate()
+  } catch {
+    return
+  }
+  const plan = keyRecoverySavePlan(
+    { enabled: recoveryForm.enabled, interval: recoveryForm.interval },
+    recoveryVersion.value,
+  )
+  if (!plan.ok) {
+    message.error(t(intervalIssueMessageKey(plan.issue)))
+    return
+  }
+  recoverySaving.value = true
+  try {
+    await updateKeyAutoRecovery(plan.payload)
+    message.success(t('keyAutoRecovery.saved'))
+    await loadRecovery()
+  } catch (err) {
+    if (err instanceof APIError && err.code === KEY_AUTO_RECOVERY_CONFLICT) {
+      message.error(t('keyAutoRecovery.conflict'))
+      void loadRecovery()
+    } else {
+      message.error(displayMessage(err, t))
+    }
+  } finally {
+    recoverySaving.value = false
+  }
+}
+
+// The page is a persistent surface (no open/close transition to hook), so
+// both settings load once on mount. Saves re-read through the same loaders.
+onMounted(() => {
+  void loadRetention()
+  void loadRecovery()
+})
+</script>
+
+<style scoped>
+.common-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-card {
+  max-width: 560px;
+  padding: var(--space-5) var(--space-6);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.settings-card__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.settings-card__desc {
+  margin: var(--space-1) 0 var(--space-4);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.settings-card__state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.settings-card__state--err {
+  color: var(--color-text-secondary);
+}
+
+.settings-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+}
+
+/* The switch's form-item row reads cleaner with the toggle pinned right,
+   matching the migrated modal's block-switch treatment. */
+:deep(.gs-recovery__switch) {
+  margin-left: auto;
+}
+</style>

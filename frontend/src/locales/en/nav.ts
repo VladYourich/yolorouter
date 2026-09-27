@@ -17,6 +17,7 @@ export default {
   groupSystem: 'System Settings',
   oauthProviders: 'Login Providers',
   users: 'Users',
+  generalSettings: 'General',
   about: 'About',
   language: 'Language',
   keyAutoRecovery: 'Key Auto Recovery',

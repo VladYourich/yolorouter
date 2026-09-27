@@ -17,6 +17,7 @@ export default {
   groupSystem: '系统设置',
   oauthProviders: '登录方式',
   users: '用户管理',
+  generalSettings: '常规',
   about: '关于',
   language: '语言设置',
   keyAutoRecovery: 'Key 自动恢复',

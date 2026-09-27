@@ -14,6 +14,7 @@ import costOptimization from './costOptimization'
 import keyAutoRecovery from './keyAutoRecovery'
 import requestLogs from './requestLogs'
 import system from './system'
+import generalSettings from './generalSettings'
 import users from './users'
 import oauthProviders from './oauthProviders'
 import rateLimits from './rateLimits'
@@ -34,6 +35,7 @@ export default {
   keyAutoRecovery,
   requestLogs,
   system,
+  generalSettings,
   users,
   oauthProviders,
   rateLimits,

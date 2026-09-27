@@ -187,6 +187,7 @@ import {
   Receipt,
   RefreshCw,
   ScrollText,
+  Settings,
   UsersRound,
   Server,
   Tags,
@@ -308,6 +309,10 @@ const navItems = computed<NavItem[]>(() => {
     { key: 'oauth-providers', label: t('nav.oauthProviders'), icon: LogIn, to: '/oauth-providers' },
 
     { key: 'group-system', label: t('nav.groupSystem'), group: true },
+    // The group's persistent-form home for instance-wide settings (request
+    // log retention, key auto recovery, language). Admin-only like /about —
+    // the member branch above keeps its own entries untouched.
+    { key: 'general-settings', label: t('nav.generalSettings'), icon: Settings, to: '/settings/general' },
     { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
     // Admin-only global setting (members' sidebar branch above is left
     // untouched), placed right after "Language" and gated the same way —

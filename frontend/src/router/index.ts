@@ -20,6 +20,7 @@ import OAuthProviderListPage from '../views/oauth/OAuthProviderListPage.vue'
 import UserListPage from '../views/users/UserListPage.vue'
 import RateLimitListPage from '../views/ratelimits/RateLimitListPage.vue'
 import SystemInfoPage from '../views/system/SystemInfoPage.vue'
+import GeneralSettingsPage from '../views/settings/GeneralSettingsPage.vue'
 import { useAuthStore } from '../store/auth'
 
 export const router = createRouter({
@@ -56,6 +57,9 @@ export const router = createRouter({
         { path: 'api-keys', component: ApiKeyListPage, meta: { memberAllowed: true } },
         { path: 'oauth-providers', component: OAuthProviderListPage },
         { path: 'users', component: UserListPage },
+        // The System Settings group's persistent-form page (retention, key
+        // auto recovery, ...). Admin-only like /about — no memberAllowed.
+        { path: 'settings/general', component: GeneralSettingsPage },
         { path: 'about', component: SystemInfoPage },
       ],
     },

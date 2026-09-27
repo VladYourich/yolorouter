@@ -102,3 +102,26 @@ export function updateKeyAutoRecovery(payload: {
     body: JSON.stringify(payload),
   })
 }
+
+// Request log retention: how many days of request logs (rows + bodies +
+// stream files) the background retention loop keeps. 0 means keep forever
+// (the seeded default). Same authoritative-read + CAS contract as the
+// settings above; a concurrent edit surfaces as errcode 11021 (HTTP 409).
+export interface RequestLogRetentionSetting {
+  retention_days: number
+  version: number
+}
+
+export function getRequestLogRetention(): Promise<RequestLogRetentionSetting> {
+  return apiFetch('/api/admin/system-settings/request-log-retention')
+}
+
+export function updateRequestLogRetention(payload: {
+  retention_days: number
+  version: number
+}): Promise<RequestLogRetentionSetting> {
+  return apiFetch('/api/admin/system-settings/request-log-retention', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}

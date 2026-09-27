@@ -1,0 +1,18 @@
+export default {
+  pageDescription: 'Instance-wide settings that apply to every user.',
+  retention: {
+    title: 'Request Log Retention',
+    desc: 'How long request logs (rows, bodies, and stream files) are kept before the background task deletes them in small batches.',
+    days: 'Retention (days)',
+    daysTip:
+      '0 keeps request logs forever. N days deletes logs older than N days, a few hundred rows per round — effective on the next round, no restart needed.',
+    daysRequired: 'Enter a retention in days (0 keeps everything)',
+    daysWholeNumber: 'The retention must be a whole number of days',
+    daysMin: 'The retention cannot be negative — use 0 to keep logs forever',
+    daysMax: 'The retention must be at most 3650 days (about 10 years)',
+    saved: 'Saved',
+    loadFailed: 'Failed to load the current setting',
+    retry: 'Retry',
+    conflict: 'This setting was changed elsewhere. Reloaded the latest version — review and save again.',
+  },
+}
