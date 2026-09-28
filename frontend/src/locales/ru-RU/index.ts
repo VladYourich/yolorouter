@@ -11,8 +11,10 @@ import failReason from './failReason'
 import analytics from './analytics'
 import costs from './costs'
 import costOptimization from './costOptimization'
+import keyAutoRecovery from './keyAutoRecovery'
 import requestLogs from './requestLogs'
 import system from './system'
+import generalSettings from './generalSettings'
 import users from './users'
 import oauthProviders from './oauthProviders'
 import rateLimits from './rateLimits'
@@ -30,8 +32,10 @@ export default {
   analytics,
   costs,
   costOptimization,
+  keyAutoRecovery,
   requestLogs,
   system,
+  generalSettings,
   users,
   oauthProviders,
   rateLimits,

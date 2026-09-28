@@ -15,6 +15,8 @@ export default {
   oauthProviders: 'Провайдеры входа',
   users: 'Пользователи',
   about: 'О системе',
+  generalSettings: 'Общие',
+  menu: 'Меню',
   language: 'Язык',
   modelPricing: 'Цены моделей',
   comingSoon: 'Скоро появится',
